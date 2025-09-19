@@ -1,0 +1,27 @@
+{
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "node-cron": "^4.2.1",
+    "viem": "^2.35.1",
+    "zx": "^8.8.1"
+  },
+  "devDependencies": {
+    "@types/cron": "^2.4.3",
+    "@types/node": "^24.3.0",
+    "nodemon": "^3.1.10",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  },
+  "name": "v2-monitor-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "tsx index.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": ""
+}
