@@ -5,6 +5,7 @@ import { mainnet } from 'viem/chains';
 import fs from 'fs';
 
 const STATE_FILE = 'state.json';
+const POST_TO_SLACK = true // toggle to only log to console for testing
 
 // TODO: LTV, and get chainlink price for ops that need it
 dotenv.config();
@@ -31,21 +32,25 @@ const MIN_REDEMPTION: bigint = 0n;
 const MIN_LIQUIDATION: bigint = 0n
 
 interface Coll {
+  label: string,
   troveManager: string,
   sp: string
 }
 
 const WETH: Coll = {
+  label: "WETH",
   troveManager: "0x7bcb64b2c9206a5b699ed43363f6f98d4776cf5a",
   sp: "0x5721cbbd64fc7ae3ef44a0a3f9a790a9264cf9bf"
 }
 
 const WSTETH: Coll = {
+    label: "WSTETH",
   troveManager: "0xa2895d6a3bf110561dfe4b71ca539d84e1928b22",
   sp: "0x9502b7c397e9aa22fe9db7ef7daf21cd2aebe56b"
 }
 
 const RETH: Coll = {
+  label: "RETH",
   troveManager: "0xb2b2abeb5c357a234363ff5d180912d319e3e19e",
   sp: "0xd442e41019b7f5c4dd78f50dc03726c446148695"
 }
@@ -105,31 +110,92 @@ const spEventSigs = {
   DepositOperation: 'event DepositOperation(address indexed _depositor, uint8 _operation, uint256 _depositLossSinceLastOperation, int256 _topUpOrWithdrawal, uint256 _yieldGainSinceLastOperation, uint256 _yieldGainClaimed, uint256 _ethGainSinceLastOperation, uint256 _ethGainClaimed)'
 };
 
-function formatNum(val: bigint) {
-    const scaledValue = Number(val) / 1e18;
-    
-    if (scaledValue < 1) {
-        return scaledValue.toFixed(2);  
-    } else if (scaledValue < 100) {
-        return scaledValue.toFixed(1);  
-    } else {
-        return scaledValue.toFixed(0); 
-    }
+// --- Chainlink data structures ---
+
+type PricePoint = {
+  block: bigint;
+  price: bigint;
+  roundId: bigint; // optional, for debugging
+}
+
+type PriceCache = {
+  WETH: PricePoint[];
+  WSTETH: PricePoint[];
+  RETH: PricePoint[];
+}
+
+// --- Formatting functions ---
+
+function formatNum(val: bigint): string {
+
+const scaledVal = Number(val) / 1e18;
+
+const absScaledVal = Math.abs(scaledVal);
+  if (absScaledVal < 1) {
+    return scaledVal.toLocaleString('en-US', { 
+      minimumFractionDigits: 2, 
+      maximumFractionDigits: 2 
+    });  
+  } else if (absScaledVal < 100) {
+    return scaledVal.toLocaleString('en-US', { 
+      minimumFractionDigits: 1, 
+      maximumFractionDigits: 1 
+    });  
+  } else {
+    return scaledVal.toLocaleString('en-US', { 
+      minimumFractionDigits: 0, 
+      maximumFractionDigits: 0 
+    }); 
+  }
 }
 
 function dateAndTime(timestamp: number) {
   return (new Date(timestamp)).toISOString().slice(0,-5).split('T').join(' ')
 }
 
+// function getTimeOrPastDateAndTime(timestamp: number) {
+//   if timestamp > 
+//   return dateAndTime(timestamp).split(" ")[1]
+// }
+
 function percent(amount: bigint): string {
   return `${(Number(amount) * 100 / 1e18).toFixed(2)}%`
 }
 
+function addCircles(val: bigint, scale: number = 1): string {
+  const absScaledVal = Math.abs(Number(val) / 1e18);
+  
+  const circle = val >= 0n ? "🟢" : "🔴"
+
+  if (absScaledVal < 100_000 / scale) {
+    return "";
+  } else if (absScaledVal < 1_000_000 / scale) {
+    return circle;
+  } else {
+    return circle.concat(circle);
+  }
+}
+
+function txHashLink(log: any): string {
+  return  `<https://etherscan.io/tx/${log.transactionHash}|Tx hash>`
+}
+
+function addressLink(address: string, linkText: string): string {
+  return `<https://etherscan.io/address/${address}|${linkText}>`
+}
+
+// --- Posting functions ---
+
 async function postToSlack(message: string): Promise<void> {
-  await axios.post(process.env.SLACK_WEBHOOK_URL!, {
-    text: message
-  });
-  console.log('Posted to Slack:', message);
+  console.log(`Posting to slack: ${POST_TO_SLACK}`)
+  if (POST_TO_SLACK) {
+    console.log(message)
+    await axios.post(process.env.SLACK_WEBHOOK_URL!, {
+      text: message
+    });
+  } else {
+    console.log(message);
+  }
 }
 
 // Ethereum client
@@ -164,15 +230,14 @@ async function postOpenTrove(logs: any[], collLabel: string) {
   )
 
   for (const trove of opened) {
-    await postToSlack(`${collLabel} Trove opened - ${dateAndTime(trove.timestamp)} \n
-      Loan: ${formatNum(trove.args._debtChangeFromOperation + trove.args._debtIncreaseFromUpfrontFee, )} BOLD \n
-      Collateral: ${formatNum(trove.args._collChangeFromOperation)} ${collLabel} \n
-      Interest rate: ${percent(trove.args._annualInterestRate)} \n
-      Trove ID: ${trove.args._troveId} \n 
-      Tx hash: ${trove.transactionHash}`
+    const debt = trove.args._debtChangeFromOperation + trove.args._debtIncreaseFromUpfrontFee;
+
+    await postToSlack(`
+      ${addCircles(debt)} *Trove opened* (${collLabel}) - Loan: ${formatNum(debt)}, Coll: ${formatNum(trove.args._collChangeFromOperation)}, Rate: ${percent(trove.args._annualInterestRate)} [${dateAndTime(trove.timestamp)}, ${txHashLink(trove)}]` 
     )
   }
 }
+// Trove closed: $41k, 32 wstETH, 2.70%, 235% [05:44, TX, Trove]
 
 async function postClosedTrove(logs: any[], collLabel: string) {
   console.log(` --- closedTroves ---`)
@@ -182,10 +247,8 @@ async function postClosedTrove(logs: any[], collLabel: string) {
   )
 
   for (const trove of closed) {
-    await postToSlack(`${collLabel} Trove closed - ${dateAndTime(trove.timestamp)} \n
-      Collateral: ${-trove.args._collChangeFromOperation} \n
-      Debt:${-trove.args._debtChangeFromOperation} 
-      Tx hash: ${trove.transactionHash} \n`
+    await postToSlack(
+      `${addCircles(trove.args._debtChangeFromOperation)} *Trove closed* (${collLabel}) - Debt: ${formatNum(trove.args._debtChangeFromOperation * -1n)}, Coll: ${formatNum(trove.args._collChangeFromOperation * -1n)} [${dateAndTime(trove.timestamp)}, ${txHashLink(trove)}]`
     )
   }
 }
@@ -212,24 +275,27 @@ async function postAdjustTrove(logs: any[], collLabel: string): Promise<void> {
 
   for (const { adjusted, updated } of txHashToEvents.values()) {
     if (adjusted && updated && adjusted.args._troveId === updated.args._troveId) {
-      const prevDebt = updated.args._debt - adjusted.args._debtIncreaseFromUpfrontFee - adjusted.args._debtChangeFromOperation
-      const prevColl = updated.args._coll - adjusted.args._collChangeFromOperation
-      const debtChangeStr = 
-        updated.args._debt === prevDebt ? 
-          `No debt change` :
-          `Debt change: ${formatNum(prevDebt)} -> ${formatNum(updated.args._debt)}`
+      const debtChange = adjusted.args._debtIncreaseFromUpfrontFee + adjusted.args._debtChangeFromOperation;
+      const prevDebt = updated.args._debt + debtChange;
+      
+      const prevColl = updated.args._coll + adjusted.args._collChangeFromOperation;
+      
+      const debtCircles = addCircles(debtChange);
+      // TODO: incorporate coll change in circle logic, for all ops - opened, adjusted, closed. 
+      // Big changes of either debt or coll (or both) should post circles.
 
-      const collChangeStr: string = updated.args._coll === prevColl ?
-        `No coll change` :
-        `Coll change: ${formatNum(prevColl)} -> ${formatNum(updated.args._coll)} ${collLabel}`
+      const debtChangeStr = 
+        updated.args._debt === prevDebt  ? 
+          `Debt: ${formatNum(prevDebt)}` :
+          `Debt: ${formatNum(prevDebt)} => ${formatNum(updated.args._debt)}`
+
+      const collChangeStr: string = 
+        updated.args._coll === prevColl ?
+         `Coll: ${formatNum(prevColl)}` :
+        `Coll: ${formatNum(prevColl)} => ${formatNum(updated.args._coll)}`
 
       postToSlack(
-        `${collLabel} Trove adjusted - ${dateAndTime(adjusted.timestamp)} \n
-        ${debtChangeStr} \n
-        ${collChangeStr} \n
-        Interest rate: ${percent(adjusted.args._annualInterestRate)} \n
-        Trove ID: ${adjusted.args._troveId} \n
-        Tx hash: ${adjusted.transactionHash} \n `
+        `${debtCircles} *Trove adjusted* (${collLabel}) - ${debtChangeStr}, ${collChangeStr}, Rate: ${percent(adjusted.args._annualInterestRate)} [${dateAndTime(adjusted.timestamp)}, ${txHashLink(adjusted)}]`
       )
     }
   }
@@ -262,15 +328,10 @@ async function postAdjustRate(logs: any[], collLabel: string): Promise<void> {
       const collAmount = formatNum(updated.args._coll);
       
       // Format interest rate (assuming it's in basis points or similar)
-      const interestRate = formatNum(adjusted.args._annualInterestRate)
+      const interestRate = percent(adjusted.args._annualInterestRate)
       
       await postToSlack(
-        `Rate Adjusted - ${dateAndTime(adjusted.timestamp)}\n
-        Loan: ${debt} BOLD \n
-        Collateral: ${collAmount} ${collLabel} \n
-        Rate: ${interestRate}% \n
-        Trove ID: ${adjusted.args._troveId} \n
-        Tx hash: ${adjusted.transactionHash} \n`
+        `*Rate Adjusted* (${collLabel}) - Loan: ${debt}, Coll: ${collAmount}, New rate: ${interestRate} [${dateAndTime(adjusted.timestamp)}, ${txHashLink(adjusted)}]`
       );
     }
   }
@@ -284,11 +345,7 @@ async function postBatchAdjustRate(logs: any[], collLabel: string): Promise<void
   
   for (const log of batchAdjusted) {
     postToSlack( 
-      `${collLabel }Batch adjusted - ${dateAndTime(log.timestamp)}
-      Batch manager: ${log.args._interestBatchManager} \n
-      Onterest rate: ${percent(log.args._annualInterestRate)} \n
-      Batch debt: ${log.args._debt} \n
-      Tx hash: ${log.transactionHash} \n`
+      `*${collLabel} Batch rate adjusted* (${collLabel}) - New rate: ${percent(log.args._annualInterestRate)}, Batch debt: ${formatNum(log.args._debt)} [${dateAndTime(log.timestamp)}, ${txHashLink(log)}, ${addressLink(log.args._interestBatchManager, "Manager")}]`
     )
   }    
 };
@@ -300,11 +357,7 @@ async function postBatchAdjustFee(logs: any[], collLabel: string): Promise<void>
   
   for (const log of batchAdjusted) {
     postToSlack( 
-      `${collLabel} Batch fee lowered - ${dateAndTime(log.timestamp)}
-      Batch manager: ${log.args._interestBatchManager} \n
-      New fee: ${log.args._annualManagementFee} \n
-      Batch debt: ${log.args._debt} \n
-      Tx hash: ${log.transactionHash} \n`
+      `${collLabel} *Batch fee lowered* (${collLabel}) - New fee: ${log.args._annualManagementFee}, Batch debt: ${log.args._debt} [${dateAndTime(log.timestamp)}, ${txHashLink(log)}, ${addressLink(log.args._interestBatchManager, "Manager")}]`
     )
   } 
 };
@@ -321,17 +374,13 @@ async function postRedemption(logs: any[], collLabel: string): Promise<void> {
   * LST_received * USD_per_LST  / BOLD_redeemed 
   */
   for (const log of redemptions) {
+    if (log.args._ETHSent === 0n) {continue;}
+
     const effectiveBOLDPrice = (log.args._ETHSent + log.args._ETHFee) * log.args._redemptionPrice / log.args._actualBoldAmount;
-  
+
     const feePct = percent(log.args._ETHFee * DECIMAL_PRECISION  / (log.args._ETHFee + log.args._ETHSent));
 
-    postToSlack(`${collLabel} Redemption - ${dateAndTime(log.timestamp)} \n
-      BOLD amount: ${log.args._actualBoldAmount} \n
-      Fee rate: ${(feePct)} \n
-      BOLD price: ${effectiveBOLDPrice} \n
-      ${collLabel} price: ${log.args._redemptionPrice} 
-      Tx hash: ${log.transactionHash}
-      \n`
+    postToSlack(` *Redemption* (${collLabel}) - Amount: ${formatNum(log.args._actualBoldAmount)}, Fee rate: ${(feePct)}, BOLD price: ${formatNum(effectiveBOLDPrice)} USD, ${collLabel} price: ${formatNum(log.args._redemptionPrice)} USD [${dateAndTime(log.timestamp)}, ${txHashLink(log)}]`
     )
   }
 }
@@ -355,11 +404,7 @@ async function postLiquidation(logs: any[], collLabel: string): Promise<void> {
     const price = log.args._price;
 
     await postToSlack(
-      `Liquidation - ${dateAndTime(log.timestamp)} \n
-      BOLD amount liquidated: ${formatNum(boldAmount)} \n
-      ${collLabel} price: ${formatNum(price)} \n
-       Tx hash: ${log.transactionHash}\n
-      --- ---`
+      `*Liquidation* ${dateAndTime(log.timestamp)} - Amount: ${formatNum(boldAmount)} ${collLabel}, price: ${formatNum(price)} USD ${txHashLink(log)}`
     );
   }
 }
@@ -367,56 +412,56 @@ async function postLiquidation(logs: any[], collLabel: string): Promise<void> {
 // --- Posting functions for all branches ---
 
 async function postAllOpenTrove(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postOpenTrove(wethTroveLogs, 'WETH')
-  await postOpenTrove(wstethTroveLogs, 'WSTETH')
-  await postOpenTrove(rethTroveLogs, 'RETH')
+  await postOpenTrove(wethTroveLogs, 'ETH')
+  await postOpenTrove(wstethTroveLogs, 'wstETH')
+  await postOpenTrove(rethTroveLogs, 'rETH')
 }
 
 async function postAllClosedTrove(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postClosedTrove(wethTroveLogs, 'WETH')
-  await postClosedTrove(wstethTroveLogs, 'WSTETH')
-  await postClosedTrove(rethTroveLogs, 'RETH')
+  await postClosedTrove(wethTroveLogs, 'ETH')
+  await postClosedTrove(wstethTroveLogs, 'wstETH')
+  await postClosedTrove(rethTroveLogs, 'rETH')
 }
 
 async function postAllAdjustTrove(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postAdjustTrove(wethTroveLogs, 'WETH')
-  await postAdjustTrove(wstethTroveLogs, 'WSTETH')
-  await postAdjustTrove(rethTroveLogs, 'RETH')
+  await postAdjustTrove(wethTroveLogs, 'ETH')
+  await postAdjustTrove(wstethTroveLogs, 'wstETH')
+  await postAdjustTrove(rethTroveLogs, 'rETH')
 }
 
 async function postAllAdjustRate(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postAdjustRate(wethTroveLogs, 'WETH')
-  await postAdjustRate(wstethTroveLogs, 'WSTETH')
-  await postAdjustRate(rethTroveLogs, 'RETH')
+  await postAdjustRate(wethTroveLogs, 'ETH')
+  await postAdjustRate(wstethTroveLogs, 'wstETH')
+  await postAdjustRate(rethTroveLogs, 'rETH')
 }
 
 async function postAllBatchAdjustRate(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postBatchAdjustRate(wethTroveLogs, 'WETH')
-  await postBatchAdjustRate(wstethTroveLogs, 'WSTETH')
-  await postBatchAdjustRate(rethTroveLogs, 'RETH')
+  await postBatchAdjustRate(wethTroveLogs, 'ETH')
+  await postBatchAdjustRate(wstethTroveLogs, 'wstETH')
+  await postBatchAdjustRate(rethTroveLogs, 'rETH')
 }
 
 async function postAllBatchAdjustFee(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postBatchAdjustFee(wethTroveLogs, 'WETH')
-  await postBatchAdjustFee(wstethTroveLogs, 'WSTETH')
-  await postBatchAdjustFee(rethTroveLogs, 'RETH')
+  await postBatchAdjustFee(wethTroveLogs, 'ETH')
+  await postBatchAdjustFee(wstethTroveLogs, 'wstETH')
+  await postBatchAdjustFee(rethTroveLogs, 'rETH')
 }
 
 async function postAllRedemption(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postRedemption(wethTroveLogs, 'WETH')
-  await postRedemption(wstethTroveLogs, 'WSTETH')
-  await postRedemption(rethTroveLogs, 'RETH')
+  await postRedemption(wethTroveLogs, 'ETH')
+  await postRedemption(wstethTroveLogs, 'wstETH')
+  await postRedemption(rethTroveLogs, 'rETH')
 }
 
 async function postAllLiquidation(wethTroveLogs: any[], wstethTroveLogs: any[], rethTroveLogs: any[]) {
-  await postLiquidation(wethTroveLogs, 'WETH')
-  await postLiquidation(wstethTroveLogs, 'WSTETH')
-  await postLiquidation(rethTroveLogs, 'RETH')
+  await postLiquidation(wethTroveLogs, 'ETH')
+  await postLiquidation(wstethTroveLogs, 'wstETH')
+  await postLiquidation(rethTroveLogs, 'rETH')
 }
 
 // --- Daily update functionality ---
 
-async function postDailyUpdate( 
+async function postDailyUpdate(
   colls: Coll[],
   boldTokenAddress,
   dayStartBlock: bigint,
@@ -425,12 +470,16 @@ async function postDailyUpdate(
   boldEvents,
   spEvents,
   interval: bigint = 1000n
-): Promise<void> {
+): Promise<NetTotals>  {
   let total = 0n;
 
   let troveLogs: any[] = []
   let boldLogs: any[] = []
-  let spLogs: any[] = []
+  const spLogs = {
+    "WETH": [],
+    "WSTETH": [],
+    "RETH": []
+  }
 
   // Get all Trove logs for the day
   for (let from = dayStartBlock; from <= dayEndBlock; ) {
@@ -446,7 +495,7 @@ async function postDailyUpdate(
         }))
       )
 
-      spLogs.push(...
+      spLogs[coll.label].push(...
         (await client.getLogs({
         address: coll.sp,
           events: spEvents,
@@ -465,63 +514,100 @@ async function postDailyUpdate(
       }))
     )
 
-
     from += span;
   }
 
   const counts = getTroveCounts(troveLogs);
-
   const minted = getMinted(boldLogs);
   const repaid = getRepaid(troveLogs);
   const redeemed = getRedeemed(troveLogs);
   const liquidated = getLiquidated(troveLogs);
+  const [wethTotals, wstethTotals, rethTotals] = getSPTotals(spLogs);
 
-  const spTotals = getSPTotals(spLogs);
+  const dayStartTime = Number((await client.getBlock({blockNumber: dayStartBlock})).timestamp) * 1000 // miliseconds
 
-  const dayStartTime = Number((await client.getBlock({blockNumber: dayStartBlock})).timestamp)
+  const state = loadBigintState();
 
+  const netTotals = {
+    netMinted: minted - repaid - liquidated - redeemed,
+    netWethSP: wethTotals.deposits - wethTotals.withdrawals,
+    netWstethSP: wstethTotals.deposits - wstethTotals.withdrawals,
+    netRethSP: rethTotals.deposits - rethTotals.withdrawals
+  }
+ 
   postToSlack(
-    ` Daily stats - ${dateAndTime(dayStartTime)}.\n
-    BOLD minted: ${formatNum(minted)}  \n
-    BOLD repaid: ${formatNum(repaid)}  \n
-    BOLD redeemed: ${formatNum(redeemed)}  \n
-    BOLD liquidated: ${formatNum(liquidated)}  \n
+    `*Daily stats* - ${dateAndTime(dayStartTime)}.\n
 
-    Troves opened: ${counts.opened} \n
-    Troves adjusted: ${counts.adjusted} \n
-    Troves closed: ${counts.closed} \n
-    Interest rate adjustments: ${counts.rateAdjusted} \n
-    Batch interest rate adjustments: ${counts.rateAdjusted}
+    *BOLD*
+    Minted: ${formatNum(minted)}  
+    Repaid: ${formatNum(repaid)}  
+    Redeemed: ${formatNum(redeemed)}  
+    Liquidated: ${formatNum(liquidated)} 
+    Net total: ${formatNum(state.lastNetMinted)} => ${formatNum(netTotals.netMinted)}
+    \n
+
+    *Troves*
+    Troves opened: ${counts.opened} 
+    Troves adjusted: ${counts.adjusted} 
+    Troves closed: ${counts.closed} 
+    Rate adjustments: ${counts.rateAdjusted} 
+    Batch adjustments: ${counts.rateAdjusted}
     \n
     
-    SP Deposits: ${formatNum(spTotals.deposits)} \n
-    SP Withdrawals: ${formatNum(spTotals.withdrawals)} \n
-    ------`
+    *SP*
+    Deposits: ${formatNum(wethTotals.deposits + wstethTotals.deposits + rethTotals.deposits )}
+    SP Withdrawals: ${formatNum(wethTotals.withdrawals + wstethTotals.withdrawals + rethTotals.withdrawals)}
+    Net Totals: ${formatNum(netTotals.netWethSP + netTotals.netWstethSP + netTotals.netRethSP)}`
    )
+
+    //  ETH SP: Deposits ${formatNum(wethTotals.deposits)} (${wethTotals.depositsCount}) | Withdrawals: ${formatNum(wethTotals.withdrawals)} (${wethTotals.withdrawalsCount}) 
+    // Net total: ${formatNum(state.lastNetWethSP)} => ${formatNum(netTotals.netWethSP)} \n
+    // WSTETH SP: Deposits ${formatNum(wstethTotals.deposits)} (${wstethTotals.depositsCount}) | Withdrawals: ${formatNum(wstethTotals.withdrawals)} (${wstethTotals.withdrawalsCount}) 
+    // Net total: ${formatNum(state.lastNetWstethSP)} => ${formatNum(netTotals.netWstethSP)} \n
+    // RETH SP: Deposits ${formatNum(rethTotals.deposits)} (${rethTotals.depositsCount}) | Withdrawals: ${formatNum(rethTotals.withdrawals)} (${rethTotals.withdrawalsCount}) 
+    // Net total: ${formatNum(state.lastNetRethSP)} => ${formatNum(netTotals.netRethSP)} \n
+
+   return netTotals;
 }
 
 interface SPTotals{
   deposits: bigint
+  depositsCount: number
   withdrawals: bigint
+  withdrawalsCount: number
 }
 
-function getSPTotals(spLogs: any[]): SPTotals {
-  const totals: SPTotals = {
+function makeSPTotals(): SPTotals {
+  return {
     deposits: 0n,
-    withdrawals: 0n
+    depositsCount: 0,
+    withdrawals: 0n,
+    withdrawalsCount: 0
+  }
+}
+
+function getSPTotals(spLogs: Record<string, any[]>): SPTotals[]  {
+  const colls = {
+    "WETH": makeSPTotals(),
+    "WSTETH": makeSPTotals(),
+    "RETH": makeSPTotals()
   }
 
-  for (const log of spLogs) {
-    if (log.eventName === "DepositOperation") {
-      if (log.args._operation === DepositOperations.provideToSP) {
-        totals.deposits += log.args._topUpOrWithdrawal
-      } else if(log.args._operation === DepositOperations.withdrawFromSP) {
-        totals.withdrawals -= log.args._topUpOrWithdrawal
+  for (const coll of Object.keys(spLogs)) {
+    for (const log of spLogs[coll]) {
+      if (log.eventName === "DepositOperation") {
+        if (log.args._operation === DepositOperations.provideToSP) {
+          colls[coll].deposits += log.args._topUpOrWithdrawal
+          colls[coll].depositsCount += 1
+        } else if(log.args._operation === DepositOperations.withdrawFromSP) {
+          colls[coll].withdrawals -= log.args._topUpOrWithdrawal // withdrawals are negative ints
+          colls[coll].withdrawalsCount += 1
+        }
       }
     }
   }
 
-  return totals;
+  return [colls.WETH, colls.WSTETH, colls.RETH];
 }
 
 function getRepaid(troveLogs: any[]): bigint {
@@ -669,7 +755,6 @@ async function findFirstTroveOps(troveEvents: any[]): Promise<void> {
   // While we have not found a first instance of each Trove op, fetch the next chunk of logs
   while (foundCount < Object.keys(first).length) {
     console.log("events chunk")
-     console.log("first")
     for (const key in first) {
       console.log(key, first[key]);
     }
@@ -697,7 +782,6 @@ async function findFirstTroveOps(troveEvents: any[]): Promise<void> {
     const allTroveLogs = wethTroveLogs.concat(wstethTroveLogs).concat(rethTroveLogs);
 
     const found = getFirstTroveOps(allTroveLogs) 
-    console.log("found")
     for (const key in found) {
       console.log(key, first[key]);
     }
@@ -722,36 +806,44 @@ async function findFirstTroveOps(troveEvents: any[]): Promise<void> {
 // --- Polling functionality ---
 
 function loadState() {
-    const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-  return {
-    lastPolledBlock: BigInt(data.lastPolledBlock),
-    lastDailyBlock: BigInt(data.lastDailyBlock)
-  };  
+  const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  return data;
+}
+
+function loadBigintState() {
+  const data = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  return Object.fromEntries(Object.entries(data).map(([k, v]) => [k, BigInt(v)]));
 }
 
 function savePolledBlock(pollBlock: bigint): void {
-  const currentState = loadState();
-  const state = { lastDailyBlock: currentState.lastDailyBlock.toString(), lastPolledBlock: pollBlock.toString() };
+  const state = loadState();
+  state.lastPolledBlock = pollBlock.toString();
   fs.writeFileSync(STATE_FILE, JSON.stringify(state));
 }
 
-function saveDailyBlock(dailyBlock: bigint): void {
-  const currentState = loadState();
-  const state = { lastDailyBlock: dailyBlock.toString(), lastPolledBlock: currentState.lastPolledBlock.toString() };
+function saveDailyStats(dailyBlock: bigint, netTotals: NetTotals): void {
+  const state = loadState();
+  state.lastDailyBlock = dailyBlock.toString();
+  state.lastNetMinted = netTotals.netMinted.toString();
+  state.lastNetWethSP = netTotals.netWethSP.toString();
+  state.lastNetWstethSP = netTotals.netWstethSP.toString();
+  state.lastNetRethSP = netTotals.netRethSP.toString();
+
   fs.writeFileSync(STATE_FILE, JSON.stringify(state));
 }
+
 
 async function pollForNewEvents() {
-  const state = loadState();
+  const state = loadBigintState();
   const currentBlock = await client.getBlockNumber();
   
+  // Only get the past day's update, even if we're >1 day out of date
   if (currentBlock - state.lastDailyBlock > BLOCKS_IN_ONE_DAY) {
     await dailyUpdate();
-    saveDailyBlock(currentBlock);
   }
 
+  // Individual events. Limit to 1 day's worth of blocks per poll
   const fromBlock = state.lastPolledBlock + 1n;
-  // Limit to 1 day's worth of blocks to avoid too many chunks
   const maxToBlock = fromBlock + BLOCKS_IN_ONE_DAY - 1n;
   const toBlock = currentBlock < maxToBlock ? currentBlock : maxToBlock;
   const interval = 1000n;
@@ -796,7 +888,6 @@ async function pollForNewEvents() {
     from += span;
   }
   
-  // Post events
   await postAllOpenTrove(wethTroveLogs, wstethTroveLogs, rethTroveLogs);
   await postAllAdjustTrove(wethTroveLogs, wstethTroveLogs, rethTroveLogs);
   await postAllClosedTrove(wethTroveLogs, wstethTroveLogs, rethTroveLogs);
@@ -805,7 +896,7 @@ async function pollForNewEvents() {
   await postAllBatchAdjustFee(wethTroveLogs, wstethTroveLogs, rethTroveLogs);
   await postAllRedemption(wethTroveLogs, wstethTroveLogs, rethTroveLogs);
   await postAllLiquidation(wethTroveLogs, wstethTroveLogs, rethTroveLogs);
-  
+
   savePolledBlock(toBlock);
 }
 
@@ -816,6 +907,13 @@ async function addTimestamps(logs: any[]): Promise<void> {
   }
 }
 
+interface NetTotals {
+  netMinted: bigint,
+  netWethSP: bigint,
+  netWstethSP: bigint,
+  netRethSP: bigint
+}
+
 async function dailyUpdate() {
   const currentBlock = await client.getBlockNumber();
   const dayStartBlock = currentBlock - BLOCKS_IN_ONE_DAY;
@@ -824,7 +922,7 @@ async function dailyUpdate() {
   const troveEvents = parseAbi(Object.values(troveEventSigs));
   const boldEvents = parseAbi(Object.values(BOLDEventSigs));
   
-  await postDailyUpdate(
+  const netTotals = await postDailyUpdate(
     [WETH, WSTETH, RETH],
     BOLD_TOKEN_ADDRESS,
     dayStartBlock,
@@ -833,6 +931,8 @@ async function dailyUpdate() {
     boldEvents,
     spEvents
   );
+
+  saveDailyStats(currentBlock, netTotals);
 }
 
 // --- Script ---
