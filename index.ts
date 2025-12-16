@@ -36,17 +36,21 @@ const MIN_REDEMPTION: bigint = 0n;
 // const MIN_LIQUIDATION: bigint = 50_000n * DECIMAL_PRECISION; 
 const MIN_LIQUIDATION: bigint = 0n
 
-//  Exchange rate on 01/10/2025 = 1.21853 STETH per WSTETH
+//  Exchange rate on 16/12/2025 = 1.22458 STETH per WSTETH
+// https://www.coingecko.com/en/coins/wrapped-steth/eth
 // TODO: replace hardcoded val with the actual val emitted in event on WSTETH contract (it changes very slowly over time)
-const WSTETH_EXCHANGE_RATE = 1_215_853_000_000_000_000n
+const WSTETH_EXCHANGE_RATE = 1_22_458_000_000_000_000n
 
 // --- Chainlink data structures ---
+
 interface PriceEntry {
   timestamp: bigint;
   answer: bigint;
   roundId: bigint;
   blockNumber: bigint;
 }
+
+// --- Collaterals ---
 
 interface Coll {
 	  label: string,
