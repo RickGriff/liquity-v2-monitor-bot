@@ -20,6 +20,7 @@ A lightweight TypeScript bot that monitors Liquity V2 activity on Ethereum mainn
 - Install deps: npm install
 - Configure .env (see below)
 - Start: npm start
-- Env vars
+  
+Env vars:
 - `ALCHEMY_API_KEY` – Ethereum mainnet RPC key
 - `SLACK_WEBHOOK_URL` – Slack incoming webhook URL
